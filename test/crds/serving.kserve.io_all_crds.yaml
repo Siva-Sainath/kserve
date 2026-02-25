@@ -8612,6 +8612,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -13426,6 +13432,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -27106,6 +27118,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -42040,6 +42058,9 @@ spec:
                             - targetPortNumber
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -62579,6 +62600,9 @@ spec:
                             - targetPorts
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -83224,6 +83248,9 @@ spec:
                             - targetPortNumber
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -103920,6 +103947,9 @@ spec:
                             - targetPorts
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:

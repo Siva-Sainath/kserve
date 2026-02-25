@@ -135,6 +135,21 @@ log_warning() {
     echo -e "${YELLOW}[WARNING]${RESET} $*" >&2
 }
 
+is_positive() {
+  input_val=$1
+  if [[ z$input_val == z ]]; then
+    input_val="no"
+  fi
+
+  if [[ $input_val == '0' || $input_val == "true" || $input_val == 'True' || $input_val == 'yes' || $input_val == 'Yes' || $input_val == 'y' || $input_val == 'Y' ]]; then
+    echo 0
+  elif [[ $input_val == '1' || $input_val == 'false' || $input_val == 'False' || $input_val == 'no' || $input_val == 'No' || $input_val == 'n' || $input_val == 'N' ]]; then
+    echo 1
+  else    
+    echo 2
+  fi
+}
+
 
 # ============================================================================
 # Infrastructure Installation Helper Functions
@@ -443,18 +458,17 @@ set_env_with_priority() {
     local current_value
     eval "current_value=\${${var_name}}"
 
-    # If current value differs from default/component/global, it must be runtime - keep it
-    if [ -n "$current_value" ] && [ "$current_value" != "$default_value" ] &&
-       [ "$current_value" != "$component_value" ] && [ "$current_value" != "$global_value" ]; then
+    # If current value exists and differs from default, it's a runtime value - keep it
+    if [ -n "$current_value" ] && [ -n "$default_value" ] && [ "$current_value" != "$default_value" ]; then
         # This is a runtime value, keep it
         return
     fi
 
     # Apply priority: component env > global env > default
     if [ -n "$component_value" ]; then
-        export "$var_name=$component_value"
+        eval "export $var_name=\"$component_value\""
     elif [ -n "$global_value" ]; then
-        export "$var_name=$global_value"
+        eval "export $var_name=\"$global_value\""
     fi
     # If both are empty, variable keeps its default value
 }
@@ -517,7 +531,7 @@ KNATIVE_SERVING_VERSION=1.15.2
 KEDA_OTEL_ADDON_VERSION=v0.0.6
 KSERVE_VERSION=v0.16.0
 ISTIO_VERSION=1.27.1
-KEDA_VERSION=2.17.2
+KEDA_VERSION=2.17.3
 OPENTELEMETRY_OPERATOR_VERSION=0.74.3
 LWS_VERSION=v0.7.0
 GATEWAY_API_VERSION=v1.4.1
@@ -540,24 +554,237 @@ DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-Knative}"
 GATEWAY_NETWORK_LAYER="${GATEWAY_NETWORK_LAYER:-false}"
 LLMISVC="${LLMISVC:-false}"
 EMBED_MANIFESTS="${EMBED_MANIFESTS:-false}"
+EMBED_TEMPLATES="${EMBED_TEMPLATES:-false}"
 KSERVE_CUSTOM_ISVC_CONFIGS="${KSERVE_CUSTOM_ISVC_CONFIGS:-}"
 
 #================================================
 # Component-Specific Variables
 #================================================
 
-ADDON_RELEASE_NAME="keda-otel-scaler"
-OTEL_RELEASE_NAME="my-opentelemetry-operator"
-KSERVE_CRD_RELEASE_NAME="kserve-crd"
-KSERVE_RELEASE_NAME="kserve"
-CRD_DIR_NAME="kserve-crd"
-CORE_DIR_NAME="kserve-resources"
+NETWORK_LAYER="${NETWORK_LAYER:-istio}"
+TEMPLATE_DIR="${SCRIPT_DIR}/templates"
+KSERVE_CRD_DIRS=(
+"${REPO_ROOT}/config/crd/full"
+"${REPO_ROOT}/config/crd/full/llmisvc"
+"${REPO_ROOT}/config/crd/full/localmodel"
+)
+KSERVE_CONFIG_DIR="${REPO_ROOT}/config/overlays/all"
+KSERVE_OVERLAY_DIR="${KSERVE_OVERLAY_DIR:-}"
 TARGET_DEPLOYMENT_NAMES=(
 "kserve-controller-manager"
+"kserve-localmodel-controller-manager"
+"llmisvc-controller-manager"
 )
-USE_LOCAL_CHARTS="${USE_LOCAL_CHARTS:-false}"
-CHARTS_DIR="${REPO_ROOT}/charts"
-SET_KSERVE_VERSION="${SET_KSERVE_VERSION:-}"
+INSTALL_RUNTIMES="${INSTALL_RUNTIMES:-false}"
+
+#================================================
+# Template Functions (EMBED_TEMPLATES MODE)
+#================================================
+
+# ============================================================================
+# Template Functions: knative-operator
+# ============================================================================
+
+get_knative_serving_istio() {
+    cat <<'KNATIVE_SERVING_ISTIO_EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knative-serving
+---
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec:
+  version: "1.15.2"
+  config:
+    deployment:
+      # Skip tag resolution for certain domains
+      registries-skipping-tag-resolving: "nvcr.io,index.docker.io"
+    domain:
+      # Patch the external domain as the default domain svc.cluster.local is not exposed on ingress (from knative 1.8)
+      example.com: ""
+  workloads:
+    - name: controller
+      resources:
+        - container: controller
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: activator
+      resources:
+        - container: activator
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: autoscaler
+      resources:
+        - container: autoscaler
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: domain-mapping
+      resources:
+        - container: domain-mapping
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: webhook
+      resources:
+        - container: webhook
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: domainmapping-webhook
+      resources:
+        - container: domainmapping-webhook
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: net-istio-controller
+      resources:
+        - container: controller
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: net-istio-webhook
+      resources:
+        - container: webhook
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+KNATIVE_SERVING_ISTIO_EOF
+}
+
+get_knative_serving_kourier() {
+    cat <<'KNATIVE_SERVING_KOURIER_EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: knative-serving
+---
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec:
+  version: "1.15.2"
+  ingress:
+    kourier:
+      enabled: true
+  config:
+    network:
+      ingress-class: "kourier.ingress.networking.knative.dev"
+    deployment:
+      # Skip tag resolution for certain domains
+      registries-skipping-tag-resolving: "nvcr.io,index.docker.io"
+    domain:
+      # Patch the external domain as the default domain svc.cluster.local is not exposed on ingress (from knative 1.8)
+      example.com: ""
+  workloads:
+    - name: controller
+      resources:
+        - container: controller
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: activator
+      resources:
+        - container: activator
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: autoscaler
+      resources:
+        - container: autoscaler
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: domain-mapping
+      resources:
+        - container: domain-mapping
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: webhook
+      resources:
+        - container: webhook
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: domainmapping-webhook
+      resources:
+        - container: domainmapping-webhook
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: net-kourier-controller
+      resources:
+        - container: controller
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+    - name: 3scale-kourier-gateway
+      resources:
+        - container: kourier-gateway
+          requests:
+            cpu: 200m
+            memory: 200Mi
+          limits:
+            cpu: 300m
+            memory: 500Mi
+KNATIVE_SERVING_KOURIER_EOF
+}
+
+
 
 #================================================
 # Component Functions
@@ -871,141 +1098,122 @@ EOF
 }
 
 # ----------------------------------------
-# CLI/Component: keda
+# CLI/Component: knative-operator
 # ----------------------------------------
 
-uninstall_keda() {
-    log_info "Uninstalling KEDA..."
+uninstall_knative_operator() {
+    log_info "Uninstalling Knative Serving..."
 
-    helm uninstall keda-otel-scaler -n "${KEDA_NAMESPACE}" 2>/dev/null || true
-    helm uninstall keda -n "${KEDA_NAMESPACE}" 2>/dev/null || true
-    kubectl delete all --all -n "${KEDA_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
-    kubectl delete namespace "${KEDA_NAMESPACE}" --wait=true --timeout=60s --force --grace-period=0 2>/dev/null || true
+    if [ "$EMBED_TEMPLATES" = "true" ]; then
+        get_knative_serving_${NETWORK_LAYER} | \
+            kubectl delete -f - --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
+    else
+        kubectl delete -f "${TEMPLATE_DIR}/knative-serving-${NETWORK_LAYER}.yaml" --ignore-not-found=true --force --grace-period=0 2>/dev/null || true
+    fi
 
-    log_success "KEDA uninstalled"
+    kubectl delete all --all -n "${SERVING_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
+    kubectl delete namespace "${SERVING_NAMESPACE}" --wait=true --timeout=60s --force --grace-period=0 2>/dev/null || true
+
+    log_info "Uninstalling Knative Operator..."
+    helm uninstall knative-operator -n "${OPERATOR_NAMESPACE}" 2>/dev/null || true
+    kubectl delete all --all -n "${OPERATOR_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
+    kubectl delete namespace "${OPERATOR_NAMESPACE}" --wait=true --timeout=60s --force --grace-period=0 2>/dev/null || true
+
+    log_success "Knative uninstalled"
 }
 
-install_keda() {
-    if helm list -n "${KEDA_NAMESPACE}" 2>/dev/null | grep -q "keda"; then
+install_knative_operator() {
+    log_info "Network layer: ${NETWORK_LAYER}"
+
+    if helm list -n "${OPERATOR_NAMESPACE}" 2>/dev/null | grep -q "knative-operator"; then
         if [ "$REINSTALL" = false ]; then
-            log_info "KEDA is already installed. Use --reinstall to reinstall."
-            return 0
+            log_info "Knative Operator is already installed. Checking Knative Serving..."
+
+            if kubectl get knativeserving knative-serving -n "${SERVING_NAMESPACE}" &>/dev/null; then
+                log_info "Knative Serving is already deployed. Use --reinstall to reinstall."
+                return 0
+            fi
         else
-            log_info "Reinstalling KEDA..."
-            uninstall_keda
+            log_info "Reinstalling Knative..."
+            uninstall_knative_operator
         fi
     fi
 
-    log_info "Adding KEDA Helm repository..."
-    helm repo add kedacore https://kedacore.github.io/charts --force-update
+    log_info "Installing Knative Operator ${KNATIVE_OPERATOR_VERSION}..."
 
-    log_info "Installing KEDA ${KEDA_VERSION}..."
-    helm install keda kedacore/keda \
-        --namespace "${KEDA_NAMESPACE}" \
-        --create-namespace \
-        --version "${KEDA_VERSION}" \
-        --wait \
-        ${KEDA_EXTRA_ARGS:-}
+    if [[ "${KNATIVE_OPERATOR_VERSION}" == v* ]]; then
+        OPERATOR_CHART_URL="https://github.com/knative/operator/releases/download/knative-${KNATIVE_OPERATOR_VERSION}/knative-operator-${KNATIVE_OPERATOR_VERSION}.tgz"
+        log_info "Using GitHub release: ${OPERATOR_CHART_URL}"
 
-    log_success "Successfully installed KEDA ${KEDA_VERSION} via Helm"
+        # shellcheck disable=SC2086
+        helm install knative-operator \
+            --namespace "${OPERATOR_NAMESPACE}" \
+            --create-namespace \
+            --wait \
+            ${KNATIVE_OPERATOR_EXTRA_ARGS:-} \
+            "${OPERATOR_CHART_URL}"
+    else
+        log_info "Adding Knative Operator Helm repository..."
+        helm repo add knative-operator https://knative.github.io/operator --force-update
 
-    wait_for_pods "${KEDA_NAMESPACE}" "app.kubernetes.io/name=keda-operator" "300s"
-
-    log_success "KEDA is ready!"
-}
-
-# ----------------------------------------
-# CLI/Component: keda-otel-addon
-# ----------------------------------------
-
-uninstall_keda_otel_addon() {
-    log_info "Uninstalling KEDA OTel add-on..."
-    helm uninstall "${ADDON_RELEASE_NAME}" -n "${KEDA_NAMESPACE}" 2>/dev/null || true
-    log_success "KEDA OTel add-on uninstalled"
-}
-
-install_keda_otel_addon() {
-    if ! kubectl get namespace "${KEDA_NAMESPACE}" &>/dev/null; then
-        log_error "KEDA namespace '${KEDA_NAMESPACE}' does not exist. Please install KEDA first."
-        exit 1
+        # shellcheck disable=SC2086
+        helm install knative-operator knative-operator/knative-operator \
+            --namespace "${OPERATOR_NAMESPACE}" \
+            --create-namespace \
+            --version "${KNATIVE_OPERATOR_VERSION}" \
+            --wait \
+            ${KNATIVE_OPERATOR_EXTRA_ARGS:-}
     fi
 
-    if helm list -n "${KEDA_NAMESPACE}" 2>/dev/null | grep -q "${ADDON_RELEASE_NAME}"; then
-        if [ "$REINSTALL" = false ]; then
-            log_info "KEDA OTel add-on is already installed. Use --reinstall to reinstall."
-            return 0
+    log_success "Successfully installed Knative Operator ${KNATIVE_OPERATOR_VERSION}"
+
+    wait_for_pods "${OPERATOR_NAMESPACE}" "name=knative-operator" "300s"
+
+    log_info "Deploying Knative Serving ${KNATIVE_SERVING_VERSION} with ${NETWORK_LAYER} network layer..."
+
+    if [ "$EMBED_TEMPLATES" = "true" ]; then
+        if [[ "${KNATIVE_SERVING_VERSION}" != "1.15.2" ]]; then
+            log_info "Customizing template with version=${KNATIVE_SERVING_VERSION}"
+            get_knative_serving_${NETWORK_LAYER} | \
+                sed -e "s/version: \".*\"/version: \"${KNATIVE_SERVING_VERSION}\"/" | \
+                kubectl apply --server-side -f -
         else
-            log_info "Reinstalling KEDA OTel add-on..."
-            uninstall_keda_otel_addon
+            get_knative_serving_${NETWORK_LAYER} | kubectl apply --server-side -f -
+        fi
+    else
+        TEMPLATE_FILE="${TEMPLATE_DIR}/knative-serving-${NETWORK_LAYER}.yaml"
+
+        if [[ ! -f "${TEMPLATE_FILE}" ]]; then
+            log_error "Template file not found: ${TEMPLATE_FILE}"
+            exit 1
+        fi
+
+        if [[ "${KNATIVE_SERVING_VERSION}" != "1.15.2" ]]; then
+            log_info "Customizing template with version=${KNATIVE_SERVING_VERSION}"
+            sed -e "s/version: \".*\"/version: \"${KNATIVE_SERVING_VERSION}\"/" \
+                "${TEMPLATE_FILE}" | kubectl apply -f -
+        else
+            kubectl apply -f "${TEMPLATE_FILE}"
         fi
     fi
 
-    log_info "Installing KEDA OTel add-on ${KEDA_OTEL_ADDON_VERSION} from kedify/otel-add-on..."
-    helm upgrade -i "${ADDON_RELEASE_NAME}" \
-        oci://ghcr.io/kedify/charts/otel-add-on \
-        --namespace "${KEDA_NAMESPACE}" \
-        --version="${KEDA_OTEL_ADDON_VERSION}" \
-        --wait \
-        ${KEDA_OTEL_ADDON_EXTRA_ARGS:-}
+    log_success "Knative Serving CR applied"
 
-    log_success "Successfully installed KEDA OTel add-on ${KEDA_OTEL_ADDON_VERSION} via Helm"
+    log_info "Waiting for Knative Serving to be ready..."
+    kubectl wait --for=condition=Ready -n "${SERVING_NAMESPACE}" KnativeServing knative-serving --timeout=300s
 
-    wait_for_pods "${KEDA_NAMESPACE}" "app.kubernetes.io/instance=${ADDON_RELEASE_NAME}" "300s"
-
-    log_success "KEDA OTel add-on is ready!"
+    log_success "Knative Operator and Serving are ready!"
 }
 
 # ----------------------------------------
-# CLI/Component: opentelemetry
+# CLI/Component: kserve-kustomize
 # ----------------------------------------
 
-uninstall_opentelemetry() {
-    log_info "Uninstalling OpenTelemetry Operator..."
-    helm uninstall "${OTEL_RELEASE_NAME}" -n "${OTEL_NAMESPACE}" 2>/dev/null || true
-    kubectl delete all --all -n "${OTEL_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
-    kubectl delete namespace "${OTEL_NAMESPACE}" --wait=true --timeout=60s --force --grace-period=0 2>/dev/null || true
-    log_success "OpenTelemetry Operator uninstalled"
-}
-
-install_opentelemetry() {
-    if helm list -n "${OTEL_NAMESPACE}" 2>/dev/null | grep -q "${OTEL_RELEASE_NAME}"; then
-        if [ "$REINSTALL" = false ]; then
-            log_info "OpenTelemetry Operator is already installed. Use --reinstall to reinstall."
-            return 0
-        else
-            log_info "Reinstalling OpenTelemetry Operator..."
-            uninstall_opentelemetry
-        fi
-    fi
-
-    log_info "Adding OpenTelemetry Helm repository..."
-    helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts --force-update
-
-    log_info "Installing OpenTelemetry Operator ${OPENTELEMETRY_OPERATOR_VERSION}..."
-    helm install "${OTEL_RELEASE_NAME}" open-telemetry/opentelemetry-operator \
-        --namespace "${OTEL_NAMESPACE}" \
-        --create-namespace \
-        --version "${OPENTELEMETRY_OPERATOR_VERSION}" \
-        --wait \
-        --set "manager.collectorImage.repository=otel/opentelemetry-collector-contrib" \
-        ${OTEL_OPERATOR_EXTRA_ARGS:-}
-
-    log_success "Successfully installed OpenTelemetry Operator via Helm"
-
-    wait_for_pods "${OTEL_NAMESPACE}" "app.kubernetes.io/name=opentelemetry-operator" "300s"
-
-    log_success "OpenTelemetry Operator is ready!"
-}
-
-# ----------------------------------------
-# CLI/Component: kserve
-# ----------------------------------------
-
-uninstall_kserve() {
+uninstall_kserve_kustomize() {
     log_info "Uninstalling KServe..."
 
     # EMBED_MANIFESTS: use embedded manifests
-    if [ "$EMBED_MANIFESTS" = "true" ]; then
+    if [ $(is_positive ${EMBED_MANIFESTS}) = "0" ]; then
         if type uninstall_kserve_manifest &>/dev/null; then
             uninstall_kserve_manifest
         else
@@ -1014,9 +1222,14 @@ uninstall_kserve() {
             exit 1
         fi
     else
-        # Development/Helm mode
-        helm uninstall "${KSERVE_RELEASE_NAME}" -n "${KSERVE_NAMESPACE}" 2>/dev/null || true
-        helm uninstall "${KSERVE_CRD_RELEASE_NAME}" -n "${KSERVE_NAMESPACE}" --namespace "${KSERVE_NAMESPACE}" 2>/dev/null || true
+        # Development mode: use kustomize
+        # Uninstall resources first
+        kubectl kustomize "${KSERVE_CONFIG_DIR}" | kubectl delete -f - --force --grace-period=0 2>/dev/null || true
+
+        # Then uninstall CRDs
+        for crd_dir in "${KSERVE_CRD_DIRS[@]}"; do
+            kubectl kustomize "${crd_dir}" | kubectl delete -f - --force --grace-period=0 2>/dev/null || true
+        done
     fi
 
     kubectl delete all --all -n "${KSERVE_NAMESPACE}" --force --grace-period=0 2>/dev/null || true
@@ -1024,20 +1237,20 @@ uninstall_kserve() {
     log_success "KServe uninstalled"
 }
 
-install_kserve() {
-    if helm list -n "${KSERVE_NAMESPACE}" 2>/dev/null | grep -q "${KSERVE_RELEASE_NAME}"; then
+install_kserve_kustomize() {
+    if kubectl get deployment kserve-controller-manager -n "${KSERVE_NAMESPACE}" &>/dev/null; then
         if [ "$REINSTALL" = false ]; then
             log_info "KServe is already installed. Use --reinstall to reinstall."
             return 0
         else
             log_info "Reinstalling KServe..."
-            uninstall_kserve
+            uninstall_kserve_kustomize
         fi
     fi
 
     # EMBED_MANIFESTS: use embedded manifests from generated script
-    if [ "$EMBED_MANIFESTS" = "true" ]; then
-        log_info "Installing KServe using embedded manifests ..."
+    if [ $(is_positive ${EMBED_MANIFESTS}) = "0" ]; then
+        log_info "Installing KServe using embedded manifests..."
 
         # Call manifest functions (these should be available in generated script)
         if type install_kserve_manifest &>/dev/null; then
@@ -1047,127 +1260,118 @@ install_kserve() {
             log_error "This script should be called from a generated installation script"
             exit 1
         fi
-    elif [ "${USE_LOCAL_CHARTS}" = true ]; then
-        # Install KServe using local charts (for development)
-        log_info "Installing KServe using local charts..."
-        log_info "📍 Using local charts from ${CHARTS_DIR}/"
 
-        # Update default version in values.yaml
-        log_info "Updating default version in values.yaml to ${KSERVE_VERSION}"
-        sed -i -e "s/*defaultVersion*/${KSERVE_VERSION}/g" ${CHARTS_DIR}/${CORE_DIR_NAME}/values.yaml
+        log_success "Successfully installed KServe"
 
-        # Install KServe CRDs from local chart
-        log_info "Installing KServe CRDs..."
-        helm upgrade --install "${KSERVE_CRD_RELEASE_NAME}" "${CHARTS_DIR}/${CRD_DIR_NAME}" \
-            --namespace "${KSERVE_NAMESPACE}" \
-            --create-namespace \
-            --wait \
-            ${KSERVE_CRD_EXTRA_ARGS:-}
+        # Wait for all controller managers to be ready
+        log_info "Waiting for KServe controllers to be ready..."
+        for deploy in "${TARGET_DEPLOYMENT_NAMES[@]}"; do
+            wait_for_deployment "${KSERVE_NAMESPACE}" "${deploy}" "300s"
+        done
 
-        # Install KServe resources from local chart
-        log_info "Installing KServe resources..."
-        helm upgrade --install "${KSERVE_RELEASE_NAME}" "${CHARTS_DIR}/${CORE_DIR_NAME}" \
-            --namespace "${KSERVE_NAMESPACE}" \
-            --create-namespace \
-            --wait \
-            ${KSERVE_EXTRA_ARGS:-}
-
-        log_success "Successfully installed KServe using local charts"
+        log_success "KServe is ready!"
     else
-        # Install KServe from OCI registry
-        log_info "Installing KServe ${KSERVE_VERSION} from OCI registry..."
+        # Development mode: use local kustomize build
+        log_info "Installing KServe via Kustomize..."
+        log_info "📍 Using local config from ${KSERVE_CRD_DIRS[*]} and ${KSERVE_CONFIG_DIR}"
 
-        # Install KServe CRDs
+        # Install CRDs first
         log_info "Installing KServe CRDs..."
-        helm upgrade --install "${KSERVE_CRD_RELEASE_NAME}" \
-            oci://ghcr.io/kserve/charts/${CRD_DIR_NAME} \
-            --version "${KSERVE_VERSION}" \
-            --namespace "${KSERVE_NAMESPACE}" \
-            --create-namespace \
-            --wait \
-            ${KSERVE_CRD_EXTRA_ARGS:-}
+        for crd_dir in "${KSERVE_CRD_DIRS[@]}"; do
+            log_info "  - Installing CRDs from ${crd_dir}..."
+            kustomize build "${crd_dir}" | kubectl apply --server-side --force-conflicts -f -
+        done
 
-        # Install KServe resources
+        # Wait for CRDs to be established
+        if [ $(is_positive ${LLMISVC}) = "0" ]; then
+            wait_for_crds "60s" \
+                "llminferenceservices.serving.kserve.io" \
+                "llminferenceserviceconfigs.serving.kserve.io"
+        else
+            wait_for_crds "60s" \
+                "inferenceservices.serving.kserve.io" \
+                "servingruntimes.serving.kserve.io" \
+                "clusterservingruntimes.serving.kserve.io" \
+                "llminferenceservices.serving.kserve.io" \
+                "llminferenceserviceconfigs.serving.kserve.io"
+        fi
+        # Install resources
         log_info "Installing KServe resources..."
-        if ! helm upgrade --install "${KSERVE_RELEASE_NAME}" \
-            oci://ghcr.io/kserve/charts/${KSERVE_RELEASE_NAME} \
-            --version "${KSERVE_VERSION}" \
-            --namespace "${KSERVE_NAMESPACE}" \
-            --create-namespace \
-            --wait \
-            ${KSERVE_EXTRA_ARGS:-}; then
+        kustomize build "${KSERVE_CONFIG_DIR}" | kubectl apply --server-side -f -
 
-            # If installation fails, try using helm upgrade after kserve controller is Ready
-            log_info "Install failed, attempting upgrade instead..."
+        # Build list of config updates
+        local config_updates=()
 
-            for deploy in "${TARGET_DEPLOYMENT_NAMES[@]}"; do
-                    wait_for_deployment "${KSERVE_NAMESPACE}" "${deploy}" "120s"
+        # Update deployment mode if needed
+        if [ "${DEPLOYMENT_MODE}" = "Standard" ] || [ "${DEPLOYMENT_MODE}" = "RawDeployment" ]; then
+            log_info "Adding deployment mode update: ${DEPLOYMENT_MODE}"
+            config_updates+=("deploy.defaultDeploymentMode=\"${DEPLOYMENT_MODE}\"")
+        fi
+
+        # Enable Gateway API for KServe(ISVC) if needed
+        if [ "${GATEWAY_NETWORK_LAYER}" != "false" ] && [ "${LLMISVC}" != "true" ]; then
+            log_info "Adding Gateway API updates: enableGatewayApi=true, ingressClassName=${GATEWAY_NETWORK_LAYER}"
+            config_updates+=("ingress.enableGatewayApi=true")
+            config_updates+=("ingress.ingressClassName=\"${GATEWAY_NETWORK_LAYER}\"")
+        fi
+
+        # Add custom configurations if provided
+        if [ -n "${KSERVE_CUSTOM_ISVC_CONFIGS}" ]; then
+            log_info "Adding custom configurations: ${KSERVE_CUSTOM_ISVC_CONFIGS}"
+            IFS='|' read -ra custom_configs <<< "${KSERVE_CUSTOM_ISVC_CONFIGS}"
+            config_updates+=("${custom_configs[@]}")
+        fi
+
+        # Apply all config updates at once if there are any
+        if [ ${#config_updates[@]} -gt 0 ]; then
+            log_info "Applying ${#config_updates[@]} configuration update(s):"
+            for update in "${config_updates[@]}"; do
+                log_info "  - ${update}"
             done
-            if ! helm upgrade "${KSERVE_RELEASE_NAME}" \
-                oci://ghcr.io/kserve/charts/${KSERVE_RELEASE_NAME} \
-                --version "${KSERVE_VERSION}" \
-                --namespace "${KSERVE_NAMESPACE}" \
-                --wait \
-                ${KSERVE_EXTRA_ARGS:-}; then
-
-                log_error "Failed to install/upgrade KServe ${KSERVE_VERSION}"
-                exit 1
+            update_isvc_config "${config_updates[@]}"
+            if [ "${LLMISVC}" != "true" ]; then
+                kubectl rollout restart deployment kserve-controller-manager -n ${KSERVE_NAMESPACE}
+            fi
+        else
+            if [ "${LLMISVC}" = "true" ]; then
+                log_info "No configuration updates needed for LLMISVC (GATEWAY_NETWORK_LAYER=${GATEWAY_NETWORK_LAYER})"
+            else
+                log_info "No configuration updates needed (DEPLOYMENT_MODE=${DEPLOYMENT_MODE}, GATEWAY_NETWORK_LAYER=${GATEWAY_NETWORK_LAYER})"
             fi
         fi
 
-        log_success "Successfully installed KServe ${KSERVE_VERSION}"
-    fi
+        log_success "Successfully installed KServe"
 
-    # Build list of config updates
-    local config_updates=()
-
-    # Update deployment mode if needed
-    if [ "${DEPLOYMENT_MODE}" = "Standard" ] || [ "${DEPLOYMENT_MODE}" = "RawDeployment" ]; then
-        log_info "Adding deployment mode update: ${DEPLOYMENT_MODE}"
-        config_updates+=("deploy.defaultDeploymentMode=\"${DEPLOYMENT_MODE}\"")
-    fi
-
-    # Enable Gateway API for KServe(ISVC) if needed
-    if [ "${GATEWAY_NETWORK_LAYER}" != "false" ] && [ "${LLMISVC}" != "true" ]; then
-        log_info "Adding Gateway API updates: enableGatewayApi=true, ingressClassName=${GATEWAY_NETWORK_LAYER}"
-        config_updates+=("ingress.enableGatewayApi=true")
-        config_updates+=("ingress.ingressClassName=\"${GATEWAY_NETWORK_LAYER}\"")
-    fi
-
-    # Add custom configurations if provided
-    if [ -n "${KSERVE_CUSTOM_ISVC_CONFIGS}" ]; then
-        log_info "Adding custom configurations: ${KSERVE_CUSTOM_ISVC_CONFIGS}"
-        IFS='|' read -ra custom_configs <<< "${KSERVE_CUSTOM_ISVC_CONFIGS}"
-        config_updates+=("${custom_configs[@]}")
-    fi
-
-    # Apply all config updates at once if there are any
-    if [ ${#config_updates[@]} -gt 0 ]; then
-        log_info "Applying ${#config_updates[@]} configuration update(s):"
-        for update in "${config_updates[@]}"; do
-            log_info "  - ${update}"
+        # Wait for all controller managers to be ready
+        log_info "Waiting for KServe controllers to be ready..."
+        for deploy in "${TARGET_DEPLOYMENT_NAMES[@]}"; do
+            wait_for_deployment "${KSERVE_NAMESPACE}" "${deploy}" "300s"
         done
-        update_isvc_config "${config_updates[@]}"
-        if [ "${LLMISVC}" != "true" ]; then
-            kubectl rollout restart deployment kserve-controller-manager -n ${KSERVE_NAMESPACE}
-        fi
-    else
-        if [ "${LLMISVC}" = "true" ]; then
-            log_info "No configuration updates needed for LLMISVC (GATEWAY_NETWORK_LAYER=${GATEWAY_NETWORK_LAYER})"
-        else
-            log_info "No configuration updates needed (DEPLOYMENT_MODE=${DEPLOYMENT_MODE}, GATEWAY_NETWORK_LAYER=${GATEWAY_NETWORK_LAYER})"
-        fi
+
+        log_success "KServe is ready!"
+
     fi
 
-    log_success "Successfully installed KServe"
+    # Wait for kserve webhook endpoint to be ready
+    sleep 2
 
-    # Wait for all controller managers to be ready
-    log_info "Waiting for KServe controllers to be ready..."
-    for deploy in "${TARGET_DEPLOYMENT_NAMES[@]}"; do
-        wait_for_deployment "${KSERVE_NAMESPACE}" "${deploy}" "300s"
-    done
-
-    log_success "KServe is ready!"
+    # Install runtime and llmisvcconfig using kustomize
+    if [ $(is_positive ${INSTALL_RUNTIMES}) = "0" ]; then
+        log_info "Installing KServe runtime manifests using kustomize..."
+        if [ $EMBED_MANIFESTS = "true" ]; then
+            create_kserve_runtime_manifests
+        else
+            kubectl apply --server-side=true -k config/runtimes
+        fi
+    fi
+    if [ $(is_positive ${LLMISVC}) = "0" ]; then
+        log_info "Installing LLMISVC configs using kustomize..."
+        if [ $EMBED_MANIFESTS = "true" ]; then
+            create_kserve_llmisvcconfig_manifests
+        else
+            kubectl apply --server-side=true -k config/llmisvcconfig
+        fi
+    fi
 }
 
 
@@ -1181,10 +1385,8 @@ main() {
         echo "=========================================="
         echo "Uninstalling components..."
         echo "=========================================="
-        uninstall_kserve
-        uninstall_opentelemetry
-        uninstall_keda_otel_addon
-        uninstall_keda
+        uninstall_kserve_manifest
+        uninstall_knative_operator
         uninstall_istio_ingress_class
         uninstall_istio
         uninstall_cert_manager
@@ -1201,7 +1403,8 @@ main() {
     echo "Install KServe Knative Mode and all related dependencies with manifests included in the script."
     echo "=========================================="
 
-
+    export EMBED_TEMPLATES="true"
+    export EMBED_MANIFESTS="true"
 
     install_helm
     install_kustomize
@@ -1209,25 +1412,22 @@ main() {
     install_cert_manager
     install_istio
     install_istio_ingress_class
-    install_keda
-    install_keda_otel_addon
-    install_opentelemetry
+    install_knative_operator
     (
-        # Set Helm release names and target pod labels based on LLMISVC
-        if [ "${LLMISVC}" = "true" ]; then
-            log_info "LLMISVC is enabled"
-            CRD_DIR_NAME="kserve-llmisvc-crd"
-            CORE_DIR_NAME="kserve-llmisvc-resources"
-            KSERVE_CRD_RELEASE_NAME="kserve-llmisvc-crd"
-            KSERVE_RELEASE_NAME="kserve-llmisvc-resources"
-            TARGET_DEPLOYMENT_NAMES=("kserve-llmisvc-controller-manager")
+        set_env_with_priority "INSTALL_RUNTIMES" "True" "" "false"
+        # Set CRD/Config directories and target pod labels based on LLMISVC
+        if [ $(is_positive ${LLMISVC}) = "0" ]; then
+            KSERVE_CRD_DIRS=(
+                "${REPO_ROOT}/config/crd/full/llmisvc"
+            )
+            KSERVE_CONFIG_DIR="${REPO_ROOT}/config/overlays/standalone/llmisvc"
+            TARGET_DEPLOYMENT_NAMES=("llmisvc-controller-manager")
         fi
-        
-        if [ "${SET_KSERVE_VERSION}" != "" ]; then
-            log_info "Setting KServe version to ${SET_KSERVE_VERSION}"
-            KSERVE_VERSION="${SET_KSERVE_VERSION}"
+        if [ "${KSERVE_OVERLAY_DIR}" != "" ]; then
+            KSERVE_CONFIG_DIR="${REPO_ROOT}/config/overlays/${KSERVE_OVERLAY_DIR}"
         fi
-        install_kserve_manifest
+
+        install_kserve_kustomize
     )
 
     echo "=========================================="
@@ -1246,10 +1446,21 @@ install_kserve_manifest() {
     log_info "Installing KServe core components..."
     get_kserve_core_manifest | kubectl apply --server-side -f -
 
-    log_success "KServe manifests installed successfully!"
+    log_success "KServe CRD and core components installed successfully!"
 }
 
 uninstall_kserve_manifest() {
+    # Uninstall in reverse order of dependencies
+    log_info "Uninstalling KServe LLMISvcConfig manifests..."
+    if [ "${LLMISVC:-false}" = "true" ] && type get_kserve_llmisvcconfig_manifests &>/dev/null; then
+        get_kserve_llmisvcconfig_manifests | kubectl delete -f - || true
+    fi
+
+    log_info "Uninstalling KServe runtime manifests..."
+    if [ "${INSTALL_RUNTIMES:-false}" = "true" ] && type get_kserve_runtime_manifests &>/dev/null; then
+        get_kserve_runtime_manifests | kubectl delete -f - || true
+    fi
+
     log_info "Uninstalling KServe core components..."
     get_kserve_core_manifest | kubectl delete -f - || true
 
@@ -1257,6 +1468,2523 @@ uninstall_kserve_manifest() {
     get_kserve_crd_manifest | kubectl delete -f - || true
 
     log_success "KServe manifests uninstalled successfully!"
+}
+
+get_kserve_runtime_manifests() {
+    cat <<'KSERVE_RUNTIME_MANIFEST_EOF'
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-huggingfaceserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    env:
+    - name: LMCACHE_USE_EXPERIMENTAL
+      value: "True"
+    image: kserve/huggingfaceserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: devshm
+  hostIPC: false
+  protocolVersions:
+  - v2
+  - v1
+  supportedModelFormats:
+  - autoSelect: true
+    name: huggingface
+    priority: 1
+    version: "1"
+  volumes:
+  - emptyDir:
+      medium: Memory
+    name: devshm
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-huggingfaceserver-multinode
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    command:
+    - bash
+    - -c
+    - "export MODEL_DIR_ARG=\"\"\nif [[ ! -z ${MODEL_ID} ]]\nthen\n  export MODEL_DIR_ARG=\"--model_dir=${MODEL_ID}\"\nfi\n\nif
+      [[ ! -z ${MODEL_DIR} ]]\nthen\n  export MODEL_DIR_ARG=\"--model_dir=${MODEL_DIR}\"\nfi\n\nexport
+      RAY_ADDRESS=${POD_IP}:${RAY_PORT}\nray start --head --disable-usage-stats --include-dashboard
+      false \npython ./huggingfaceserver/health_check.py registered_nodes --retries
+      200  --probe_name runtime_start\n\npython -m huggingfaceserver ${MODEL_DIR_ARG}
+      --tensor-parallel-size=${TENSOR_PARALLEL_SIZE} --pipeline-parallel-size=${PIPELINE_PARALLEL_SIZE}
+      $0 $@\n"
+    env:
+    - name: RAY_PORT
+      value: "6379"
+    - name: POD_NAMESPACE
+      valueFrom:
+        fieldRef:
+          fieldPath: metadata.namespace
+    - name: POD_IP
+      valueFrom:
+        fieldRef:
+          fieldPath: status.podIP
+    - name: VLLM_CONFIG_ROOT
+      value: /tmp
+    - name: HF_HUB_CACHE
+      value: /tmp
+    image: kserve/huggingfaceserver:latest-gpu
+    livenessProbe:
+      exec:
+        command:
+        - bash
+        - -c
+        - |
+          python ./huggingfaceserver/health_check.py registered_node_and_runtime_health --health_check_url http://localhost:8080 --probe_name head_liveness
+      failureThreshold: 2
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 15
+    name: kserve-container
+    readinessProbe:
+      exec:
+        command:
+        - bash
+        - -c
+        - |
+          python ./huggingfaceserver/health_check.py runtime_health --health_check_url http://localhost:8080 --probe_name head_readiness
+      failureThreshold: 2
+      periodSeconds: 5
+      successThreshold: 1
+      timeoutSeconds: 15
+    resources:
+      limits:
+        cpu: "4"
+        memory: 12Gi
+      requests:
+        cpu: "2"
+        memory: 6Gi
+    startupProbe:
+      exec:
+        command:
+        - bash
+        - -c
+        - |
+          python ./huggingfaceserver/health_check.py registered_node_and_runtime_health --health_check_url http://localhost:8080 --probe_name head_startup
+      failureThreshold: 40
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      successThreshold: 1
+      timeoutSeconds: 30
+    volumeMounts:
+    - mountPath: /dev/shm
+      name: shm
+  protocolVersions:
+  - v2
+  - v1
+  supportedModelFormats:
+  - autoSelect: true
+    name: huggingface
+    priority: 2
+    version: "1"
+  volumes:
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 3Gi
+    name: shm
+  workerSpec:
+    containers:
+    - command:
+      - bash
+      - -c
+      - "export RAY_HEAD_ADDRESS=${HEAD_SVC}.${POD_NAMESPACE}.svc.cluster.local:6379\nSECONDS=0\n\nwhile
+        true; do              \n  if (( SECONDS <= 240 )); then\n    if ray health-check
+        --address \"${RAY_HEAD_ADDRESS}\" > /dev/null 2>&1; then\n      echo \"Ray
+        Global Control Service(GCS) is ready.\"\n      break\n    fi\n    echo \"$SECONDS
+        seconds elapsed: Waiting for Ray Global Control Service(GCS) to be ready.\"\n
+        \ else\n    if ray health-check --address \"${RAY_HEAD_ADDRESS}\"; then\n
+        \     echo \"Ray Global Control Service(GCS) is ready. Any error messages
+        above can be safely ignored.\"\n      break\n    fi\n    echo \"$SECONDS seconds
+        elapsed: Still waiting for Ray Global Control Service(GCS) to be ready.\"\n
+        \ fi\n\n  sleep 5\ndone\n\necho \"Attempting to connect to Ray cluster at
+        $RAY_HEAD_ADDRESS ...\"\nray start --address=\"${RAY_HEAD_ADDRESS}\" --block\n"
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      image: kserve/huggingfaceserver:latest-gpu
+      livenessProbe:
+        exec:
+          command:
+          - bash
+          - -c
+          - |
+            export RAY_ADDRESS=${HEAD_SVC}.${POD_NAMESPACE}.svc.cluster.local:6379
+            python ./huggingfaceserver/health_check.py registered_nodes --probe_name worker_liveness
+        failureThreshold: 2
+        periodSeconds: 5
+        successThreshold: 1
+        timeoutSeconds: 15
+      name: worker-container
+      resources:
+        limits:
+          cpu: "4"
+          memory: 12Gi
+        requests:
+          cpu: "2"
+          memory: 6Gi
+      startupProbe:
+        exec:
+          command:
+          - bash
+          - -c
+          - |
+            export RAY_HEAD_NODE=${HEAD_SVC}.${POD_NAMESPACE}.svc.cluster.local
+            export RAY_ADDRESS=${RAY_HEAD_NODE}:6379
+            python ./huggingfaceserver/health_check.py registered_node_and_runtime_models --runtime_url http://${RAY_HEAD_NODE}:8080/v1/models --probe_name worker_startup
+        failureThreshold: 40
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        successThreshold: 1
+        timeoutSeconds: 30
+      volumeMounts:
+      - mountPath: /dev/shm
+        name: shm
+    pipelineParallelSize: 1
+    tensorParallelSize: 1
+    volumes:
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 3Gi
+      name: shm
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-lgbserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    - --nthread=1
+    image: kserve/lgbserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: lightgbm
+    priority: 2
+    version: "4"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-mlserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - env:
+    - name: MLSERVER_MODEL_IMPLEMENTATION
+      value: '{{.Labels.modelClass}}'
+    - name: MLSERVER_HTTP_PORT
+      value: "8080"
+    - name: MLSERVER_GRPC_PORT
+      value: "9000"
+    - name: MODELS_DIR
+      value: /mnt/models
+    image: docker.io/seldonio/mlserver:1.5.0
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: sklearn
+    priority: 3
+    version: "0"
+  - autoSelect: true
+    name: sklearn
+    priority: 3
+    version: "1"
+  - autoSelect: true
+    name: xgboost
+    priority: 3
+    version: "1"
+  - autoSelect: true
+    name: xgboost
+    priority: 3
+    version: "2"
+  - autoSelect: true
+    name: lightgbm
+    priority: 3
+    version: "3"
+  - autoSelect: true
+    name: lightgbm
+    priority: 3
+    version: "4"
+  - autoSelect: true
+    name: mlflow
+    priority: 1
+    version: "1"
+  - autoSelect: true
+    name: mlflow
+    priority: 1
+    version: "2"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-paddleserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    image: kserve/paddleserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: paddle
+    priority: 1
+    version: "2"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-pmmlserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    image: kserve/pmmlserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: pmml
+    priority: 1
+    version: "3"
+  - autoSelect: true
+    name: pmml
+    priority: 1
+    version: "4"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-predictiveserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    - --framework={{.Annotations.modelFormat}}
+    - --nthread=1
+    image: kserve/predictiveserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: sklearn
+    priority: 1
+    version: "1"
+  - autoSelect: true
+    name: xgboost
+    priority: 1
+    version: "2"
+  - autoSelect: true
+    name: lightgbm
+    priority: 1
+    version: "4"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-sklearnserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    image: kserve/sklearnserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: sklearn
+    priority: 2
+    version: "1"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-tensorflow-serving
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --port=9000
+    - --rest_api_port=8080
+    - --model_base_path=/mnt/models
+    - --rest_api_timeout_in_ms=60000
+    command:
+    - /usr/bin/tensorflow_model_server
+    image: tensorflow/serving:2.6.2
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+      runAsUser: 1000
+  protocolVersions:
+  - v1
+  - grpc-v1
+  supportedModelFormats:
+  - autoSelect: true
+    name: tensorflow
+    priority: 2
+    version: "1"
+  - autoSelect: true
+    name: tensorflow
+    priority: 2
+    version: "2"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-torchserve
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8082"
+  containers:
+  - args:
+    - torchserve
+    - --start
+    - --model-store=/mnt/models/model-store
+    - --ts-config=/mnt/models/config/config.properties
+    env:
+    - name: TS_SERVICE_ENVELOPE
+      value: '{{.Labels.serviceEnvelope}}'
+    image: pytorch/torchserve-kfs:0.9.0
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+      runAsUser: 1000
+  protocolVersions:
+  - v1
+  - v2
+  - grpc-v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: pytorch
+    priority: 2
+    version: "1"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-tritonserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8002"
+  containers:
+  - args:
+    - tritonserver
+    - --model-store=/mnt/models
+    - --grpc-port=9000
+    - --http-port=8080
+    - --allow-grpc=true
+    - --allow-http=true
+    image: nvcr.io/nvidia/tritonserver:23.05-py3
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+      runAsUser: 1000
+  protocolVersions:
+  - v2
+  - grpc-v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: tensorrt
+    priority: 1
+    version: "8"
+  - autoSelect: true
+    name: tensorflow
+    priority: 1
+    version: "1"
+  - autoSelect: true
+    name: tensorflow
+    priority: 1
+    version: "2"
+  - autoSelect: true
+    name: onnx
+    priority: 1
+    version: "1"
+  - name: pytorch
+    version: "1"
+  - autoSelect: true
+    name: triton
+    priority: 1
+    version: "2"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ClusterServingRuntime
+metadata:
+  name: kserve-xgbserver
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+  - args:
+    - --model_name={{.Name}}
+    - --model_dir=/mnt/models
+    - --http_port=8080
+    - --nthread=1
+    image: kserve/xgbserver:latest
+    name: kserve-container
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2Gi
+      requests:
+        cpu: "1"
+        memory: 2Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      privileged: false
+      runAsNonRoot: true
+  protocolVersions:
+  - v1
+  - v2
+  supportedModelFormats:
+  - autoSelect: true
+    name: xgboost
+    priority: 2
+    version: "2"
+KSERVE_RUNTIME_MANIFEST_EOF
+}
+
+get_kserve_llmisvcconfig_manifests() {
+    cat <<'KSERVE_LLMISVCCONFIG_MANIFEST_EOF'
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-decode-template
+  namespace: kserve
+spec:
+  template:
+    containers:
+    - command:
+      - vllm
+      - serve
+      - /mnt/models
+      - --served-model-name
+      - '{{ .Spec.Model.Name }}'
+      - --port
+      - "8001"
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: main
+      ports:
+      - containerPort: 8001
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 5
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      startupProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 10
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    initContainers:
+    - args:
+      - --port=8000
+      - --vllm-port=8001
+      - --connector=nixlv2
+      - --secure-proxy=false
+      env:
+      - name: INFERENCE_POOL_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: llm-d-routing-sidecar
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 10
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+      resources: {}
+      restartPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-decode-worker-data-parallel
+  namespace: kserve
+spec:
+  template:
+    containers:
+    - command:
+      - /bin/bash
+      - -c
+      - |2-
+
+        if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+          echo "Trying to infer RoCE configs ... "
+          grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+          grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+          KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+          echo "[Infer RoCE] Discovering active HCAs ..."
+          active_hcas=()
+          # Loop through all mlx5 devices found in sysfs
+          for hca_dir in /sys/class/infiniband/mlx5_*; do
+              # Ensure it's a directory before proceeding
+              if [ -d "$hca_dir" ]; then
+                  hca_name=$(basename "$hca_dir")
+                  port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                  type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                  echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                  if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                      echo "[Infer RoCE] Found active HCA: $hca_name"
+                      active_hcas+=("$hca_name")
+                  else
+                      echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                  fi
+              fi
+          done
+
+          ucx_hcas=()
+          for hca in "${active_hcas[@]}"; do
+            ucx_hcas+=("${hca}:1")
+          done
+
+          # Check if we found any active HCAs
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              # Join the array elements with a comma
+              hcas=$(IFS=,; echo "${active_hcas[*]}")
+              echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+              export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+              export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+              export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+              echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+              echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+          else
+              echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+          fi
+
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+              # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+              declare -A gid_index_count
+              declare -A hca_gid_index
+
+              for hca_name in "${active_hcas[@]}"; do
+                  echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                  # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                  for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                      if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                          idx=$(basename "$tpath")
+                          gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                          # Check for IPv4 GID (contains ffff:)
+                          if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                              gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                              echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                              hca_gid_index["${hca_name}"]="${idx}"
+                              gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                              break  # Use first found IPv4 GID per HCA
+                          fi
+                      fi
+                  done
+              done
+
+              # Find the most common GID index (most likely to be consistent across nodes)
+              best_gid_index=""
+              max_count=0
+              for idx in "${!gid_index_count[@]}"; do
+                  count=${gid_index_count["${idx}"]}
+                  echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                  if [ $count -gt $max_count ]; then
+                      max_count=$count
+                      best_gid_index="$idx"
+                  fi
+              done
+
+              # Use deterministic fallback if counts are equal - prefer lower index number
+              if [ ${#gid_index_count[@]} -gt 1 ]; then
+                  echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                  # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                  if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                      best_gid_index="3"
+                      echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                  fi
+              fi
+
+              # Check if GID_INDEX is already set via environment variables
+              if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                  echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+              elif [ -n "$best_gid_index" ]; then
+                  echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                  echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+              else
+                  echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+              fi
+          else
+              echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+          fi
+        fi
+
+        START_RANK=0
+        eval "vllm serve \
+          /mnt/models \
+          --served-model-name "{{ .Spec.Model.Name }}" \
+          --port 8001 \
+          --api-server-count ${VLLM_API_SERVER_COUNT:-8} \
+          {{- if .Spec.Parallelism.Expert -}}--enable-expert-parallel{{- end }} \
+          {{- if .Spec.Parallelism.Tensor -}}--tensor-parallel-size {{ .Spec.Parallelism.Tensor }}{{- end }} \
+          --data-parallel-size {{ or .Spec.Parallelism.Data 1 }} \
+          --data-parallel-size-local {{ or .Spec.Parallelism.DataLocal 1 }} \
+          --data-parallel-address $(LWS_LEADER_ADDRESS) \
+          --data-parallel-rpc-port {{ if .Spec.Parallelism.DataRPCPort }}{{ .Spec.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+          --data-parallel-start-rank $START_RANK \
+          ${VLLM_ADDITIONAL_ARGS} \
+          $@ \
+          --trust-remote-code"
+          # BackendTLSPolicy is not implemented yet so disable SSL for now
+          # --enable-ssl-refresh \
+          # --ssl-certfile \
+          # /etc/ssl/certs/tls.crt \
+          # --ssl-keyfile \
+          # /etc/ssl/certs/tls.key"
+      - --
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: main
+      ports:
+      - containerPort: 8001
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 30
+        timeoutSeconds: 5
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          add:
+          - IPC_LOCK
+          - SYS_RAWIO
+          - NET_RAW
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      startupProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8001
+          scheme: HTTP
+        periodSeconds: 10
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    initContainers:
+    - args:
+      - --port=8000
+      - --vllm-port=8001
+      - --connector=nixlv2
+      - --secure-proxy=false
+      env:
+      - name: INFERENCE_POOL_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: llm-d-routing-sidecar
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 10
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+      restartPolicy: Always
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: true
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+  worker:
+    containers:
+    - command:
+      - /bin/bash
+      - -c
+      - |2-
+
+        if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+          echo "Trying to infer RoCE configs ... "
+          grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+          grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+          KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+          echo "[Infer RoCE] Discovering active HCAs ..."
+          active_hcas=()
+          # Loop through all mlx5 devices found in sysfs
+          for hca_dir in /sys/class/infiniband/mlx5_*; do
+              # Ensure it's a directory before proceeding
+              if [ -d "$hca_dir" ]; then
+                  hca_name=$(basename "$hca_dir")
+                  port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                  type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                  echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                  if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                      echo "[Infer RoCE] Found active HCA: $hca_name"
+                      active_hcas+=("$hca_name")
+                  else
+                      echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                  fi
+              fi
+          done
+
+          ucx_hcas=()
+          for hca in "${active_hcas[@]}"; do
+            ucx_hcas+=("${hca}:1")
+          done
+
+          # Check if we found any active HCAs
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              # Join the array elements with a comma
+              hcas=$(IFS=,; echo "${active_hcas[*]}")
+              echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+              export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+              export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+              export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+              echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+              echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+          else
+              echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+          fi
+
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+              # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+              declare -A gid_index_count
+              declare -A hca_gid_index
+
+              for hca_name in "${active_hcas[@]}"; do
+                  echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                  # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                  for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                      if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                          idx=$(basename "$tpath")
+                          gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                          # Check for IPv4 GID (contains ffff:)
+                          if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                              gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                              echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                              hca_gid_index["${hca_name}"]="${idx}"
+                              gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                              break  # Use first found IPv4 GID per HCA
+                          fi
+                      fi
+                  done
+              done
+
+              # Find the most common GID index (most likely to be consistent across nodes)
+              best_gid_index=""
+              max_count=0
+              for idx in "${!gid_index_count[@]}"; do
+                  count=${gid_index_count["${idx}"]}
+                  echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                  if [ $count -gt $max_count ]; then
+                      max_count=$count
+                      best_gid_index="$idx"
+                  fi
+              done
+
+              # Use deterministic fallback if counts are equal - prefer lower index number
+              if [ ${#gid_index_count[@]} -gt 1 ]; then
+                  echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                  # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                  if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                      best_gid_index="3"
+                      echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                  fi
+              fi
+
+              # Check if GID_INDEX is already set via environment variables
+              if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                  echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+              elif [ -n "$best_gid_index" ]; then
+                  echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                  echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+              else
+                  echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+              fi
+          else
+              echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+          fi
+        fi
+
+        START_RANK=$(( ${LWS_WORKER_INDEX:-0} * {{ or .Spec.Parallelism.DataLocal 1 }} ))
+        eval "vllm serve \
+          /mnt/models \
+          --served-model-name "{{ .Spec.Model.Name }}" \
+          --port 8001 \
+          {{- if .Spec.Parallelism.Expert }}--enable-expert-parallel{{- end }} \
+          {{- if .Spec.Parallelism.Tensor }}--tensor-parallel-size {{ .Spec.Parallelism.Tensor }}{{- end }} \
+          --data-parallel-size {{ or .Spec.Parallelism.Data 1 }} \
+          --data-parallel-size-local {{ or .Spec.Parallelism.DataLocal 1 }} \
+          --data-parallel-address $(LWS_LEADER_ADDRESS) \
+          --data-parallel-rpc-port {{ if .Spec.Parallelism.DataRPCPort }}{{ .Spec.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+          --data-parallel-start-rank $START_RANK \
+          ${VLLM_ADDITIONAL_ARGS} \
+          $@ \
+          --trust-remote-code \
+          --headless"
+          # BackendTLSPolicy is not implemented yet so disable SSL for now
+          # --enable-ssl-refresh \
+          # --ssl-certfile \
+          # /etc/ssl/certs/tls.crt \
+          # --ssl-keyfile \
+          # /etc/ssl/certs/tls.key"
+      - --
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+        value: "1"
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      name: main
+      ports:
+      - containerPort: 8001
+        protocol: TCP
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          add:
+          - IPC_LOCK
+          - SYS_RAWIO
+          - NET_RAW
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-prefill-template
+  namespace: kserve
+spec:
+  prefill:
+    template:
+      containers:
+      - command:
+        - vllm
+        - serve
+        - /mnt/models
+        - --served-model-name
+        - '{{ .Spec.Model.Name }}'
+        - --port
+        - "8000"
+        env:
+        - name: HOME
+          value: /home
+        - name: VLLM_LOGGING_LEVEL
+          value: INFO
+        - name: HF_HUB_CACHE
+          value: /models
+        image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 10
+          timeoutSeconds: 10
+        name: main
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: false
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 10
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /home
+          name: home
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /models
+          name: model-cache
+        - mountPath: /etc/ssl/certs
+          name: tls-certs
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: home
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+        name: dshm
+      - emptyDir: {}
+        name: model-cache
+      - name: tls-certs
+        secret:
+          secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-prefill-worker-data-parallel
+  namespace: kserve
+spec:
+  prefill:
+    template:
+      containers:
+      - command:
+        - /bin/bash
+        - -c
+        - |2-
+
+          if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+            echo "Trying to infer RoCE configs ... "
+            grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+            grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+            KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+            echo "[Infer RoCE] Discovering active HCAs ..."
+            active_hcas=()
+            # Loop through all mlx5 devices found in sysfs
+            for hca_dir in /sys/class/infiniband/mlx5_*; do
+                # Ensure it's a directory before proceeding
+                if [ -d "$hca_dir" ]; then
+                    hca_name=$(basename "$hca_dir")
+                    port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                    type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                    echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                    if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                        echo "[Infer RoCE] Found active HCA: $hca_name"
+                        active_hcas+=("$hca_name")
+                    else
+                        echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                    fi
+                fi
+            done
+
+            ucx_hcas=()
+            for hca in "${active_hcas[@]}"; do
+              ucx_hcas+=("${hca}:1")
+            done
+
+            # Check if we found any active HCAs
+            if [ ${#active_hcas[@]} -gt 0 ]; then
+                # Join the array elements with a comma
+                hcas=$(IFS=,; echo "${active_hcas[*]}")
+                echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+                export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+                export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+                export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+                echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+                echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+            else
+                echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+            fi
+
+            if [ ${#active_hcas[@]} -gt 0 ]; then
+                echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+                # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+                declare -A gid_index_count
+                declare -A hca_gid_index
+
+                for hca_name in "${active_hcas[@]}"; do
+                    echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                    # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                    for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                        if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                            idx=$(basename "$tpath")
+                            gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                            # Check for IPv4 GID (contains ffff:)
+                            if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                                gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                                echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                                hca_gid_index["${hca_name}"]="${idx}"
+                                gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                                break  # Use first found IPv4 GID per HCA
+                            fi
+                        fi
+                    done
+                done
+
+                # Find the most common GID index (most likely to be consistent across nodes)
+                best_gid_index=""
+                max_count=0
+                for idx in "${!gid_index_count[@]}"; do
+                    count=${gid_index_count["${idx}"]}
+                    echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                    if [ $count -gt $max_count ]; then
+                        max_count=$count
+                        best_gid_index="$idx"
+                    fi
+                done
+
+                # Use deterministic fallback if counts are equal - prefer lower index number
+                if [ ${#gid_index_count[@]} -gt 1 ]; then
+                    echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                    # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                    if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                        best_gid_index="3"
+                        echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                    fi
+                fi
+
+                # Check if GID_INDEX is already set via environment variables
+                if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                    echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                    export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                    export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                    echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+                elif [ -n "$best_gid_index" ]; then
+                    echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                    export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                    export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                    echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+                else
+                    echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+                fi
+            else
+                echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+            fi
+          fi
+
+          START_RANK=0
+          eval "vllm serve \
+            /mnt/models \
+            --served-model-name "{{ .Spec.Model.Name }}" \
+            --port 8000 \
+            --api-server-count ${VLLM_API_SERVER_COUNT:-8} \
+            {{- if .Spec.Prefill.Parallelism.Expert -}}--enable-expert-parallel{{- end }} \
+            {{- if .Spec.Prefill.Parallelism.Tensor -}}--tensor-parallel-size {{ .Spec.Prefill.Parallelism.Tensor }}{{- end }} \
+            --data-parallel-size {{ or .Spec.Prefill.Parallelism.Data 1 }} \
+            --data-parallel-size-local {{ or .Spec.Prefill.Parallelism.DataLocal 1 }} \
+            --data-parallel-address $(LWS_LEADER_ADDRESS) \
+            --data-parallel-rpc-port {{ if .Spec.Prefill.Parallelism.DataRPCPort }}{{ .Spec.Prefill.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+            --data-parallel-start-rank $START_RANK \
+            ${VLLM_ADDITIONAL_ARGS} \
+            $@ \
+            --trust-remote-code"
+            # BackendTLSPolicy is not implemented yet so disable SSL for now
+            # --enable-ssl-refresh \
+            # --ssl-certfile \
+            # /etc/ssl/certs/tls.crt \
+            # --ssl-keyfile \
+            # /etc/ssl/certs/tls.key"
+        - --
+        env:
+        - name: HOME
+          value: /home
+        - name: VLLM_LOGGING_LEVEL
+          value: INFO
+        - name: HF_HUB_CACHE
+          value: /models
+        image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 10
+          timeoutSeconds: 10
+        name: main
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 30
+          timeoutSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - IPC_LOCK
+            - SYS_RAWIO
+            - NET_RAW
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: false
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 60
+          httpGet:
+            path: /health
+            port: 8000
+            scheme: HTTP
+          periodSeconds: 10
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /home
+          name: home
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /models
+          name: model-cache
+        - mountPath: /etc/ssl/certs
+          name: tls-certs
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: home
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+        name: dshm
+      - emptyDir: {}
+        name: model-cache
+      - name: tls-certs
+        secret:
+          secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+    worker:
+      containers:
+      - command:
+        - /bin/bash
+        - -c
+        - |2-
+
+          if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+            echo "Trying to infer RoCE configs ... "
+            grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+            grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+            KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+            echo "[Infer RoCE] Discovering active HCAs ..."
+            active_hcas=()
+            # Loop through all mlx5 devices found in sysfs
+            for hca_dir in /sys/class/infiniband/mlx5_*; do
+                # Ensure it's a directory before proceeding
+                if [ -d "$hca_dir" ]; then
+                    hca_name=$(basename "$hca_dir")
+                    port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                    type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                    echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                    if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                        echo "[Infer RoCE] Found active HCA: $hca_name"
+                        active_hcas+=("$hca_name")
+                    else
+                        echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                    fi
+                fi
+            done
+
+            ucx_hcas=()
+            for hca in "${active_hcas[@]}"; do
+              ucx_hcas+=("${hca}:1")
+            done
+
+            # Check if we found any active HCAs
+            if [ ${#active_hcas[@]} -gt 0 ]; then
+                # Join the array elements with a comma
+                hcas=$(IFS=,; echo "${active_hcas[*]}")
+                echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+                export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+                export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+                export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+                echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+                echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+            else
+                echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+            fi
+
+            if [ ${#active_hcas[@]} -gt 0 ]; then
+                echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+                # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+                declare -A gid_index_count
+                declare -A hca_gid_index
+
+                for hca_name in "${active_hcas[@]}"; do
+                    echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                    # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                    for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                        if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                            idx=$(basename "$tpath")
+                            gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                            # Check for IPv4 GID (contains ffff:)
+                            if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                                gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                                echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                                hca_gid_index["${hca_name}"]="${idx}"
+                                gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                                break  # Use first found IPv4 GID per HCA
+                            fi
+                        fi
+                    done
+                done
+
+                # Find the most common GID index (most likely to be consistent across nodes)
+                best_gid_index=""
+                max_count=0
+                for idx in "${!gid_index_count[@]}"; do
+                    count=${gid_index_count["${idx}"]}
+                    echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                    if [ $count -gt $max_count ]; then
+                        max_count=$count
+                        best_gid_index="$idx"
+                    fi
+                done
+
+                # Use deterministic fallback if counts are equal - prefer lower index number
+                if [ ${#gid_index_count[@]} -gt 1 ]; then
+                    echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                    # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                    if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                        best_gid_index="3"
+                        echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                    fi
+                fi
+
+                # Check if GID_INDEX is already set via environment variables
+                if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                    echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                    export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                    export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                    echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+                elif [ -n "$best_gid_index" ]; then
+                    echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                    export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                    export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                    export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                    echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+                else
+                    echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+                fi
+            else
+                echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+            fi
+          fi
+
+          START_RANK=$(( ${LWS_WORKER_INDEX:-0} * {{ or .Spec.Prefill.Parallelism.DataLocal 1 }} ))
+          eval "vllm serve \
+            /mnt/models \
+            --served-model-name "{{ .Spec.Model.Name }}" \
+            --port 8000 \
+            {{- if .Spec.Prefill.Parallelism.Expert }}--enable-expert-parallel{{- end }} \
+            {{- if .Spec.Prefill.Parallelism.Tensor }}--tensor-parallel-size {{ .Spec.Prefill.Parallelism.Tensor }}{{- end }} \
+            --data-parallel-size {{ or .Spec.Prefill.Parallelism.Data 1 }} \
+            --data-parallel-size-local {{ or .Spec.Prefill.Parallelism.DataLocal 1 }} \
+            --data-parallel-address $(LWS_LEADER_ADDRESS) \
+            --data-parallel-rpc-port {{ if .Spec.Prefill.Parallelism.DataRPCPort }}{{ .Spec.Prefill.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+            --data-parallel-start-rank $START_RANK \
+            ${VLLM_ADDITIONAL_ARGS} \
+            $@ \
+            --trust-remote-code \
+            --headless"
+            # BackendTLSPolicy is not implemented yet so disable SSL for now
+            # --enable-ssl-refresh \
+            # --ssl-certfile \
+            # /etc/ssl/certs/tls.crt \
+            # --ssl-keyfile \
+            # /etc/ssl/certs/tls.key"
+        - --
+        env:
+        - name: HOME
+          value: /home
+        - name: VLLM_LOGGING_LEVEL
+          value: INFO
+        - name: HF_HUB_CACHE
+          value: /models
+        image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+        imagePullPolicy: IfNotPresent
+        name: main
+        ports:
+        - containerPort: 8000
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - IPC_LOCK
+            - SYS_RAWIO
+            - NET_RAW
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+          runAsNonRoot: false
+          seccompProfile:
+            type: RuntimeDefault
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: FallbackToLogsOnError
+        volumeMounts:
+        - mountPath: /home
+          name: home
+        - mountPath: /dev/shm
+          name: dshm
+        - mountPath: /models
+          name: model-cache
+        - mountPath: /etc/ssl/certs
+          name: tls-certs
+          readOnly: true
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - emptyDir: {}
+        name: home
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+        name: dshm
+      - emptyDir: {}
+        name: model-cache
+      - name: tls-certs
+        secret:
+          secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-router-route
+  namespace: kserve
+spec:
+  router:
+    route:
+      http:
+        spec:
+          parentRefs:
+          - group: gateway.networking.k8s.io
+            kind: Gateway
+            name: '{{ .GlobalConfig.IngressGatewayName }}'
+            namespace: '{{ .GlobalConfig.IngressGatewayNamespace }}'
+          rules:
+          - backendRefs:
+            - group: inference.networking.k8s.io
+              kind: InferencePool
+              name: '{{ ChildName .ObjectMeta.Name `-inference-pool` }}'
+              port: 8000
+              weight: 1
+            filters:
+            - type: URLRewrite
+              urlRewrite:
+                path:
+                  replacePrefixMatch: /v1/completions
+                  type: ReplacePrefixMatch
+            matches:
+            - path:
+                type: PathPrefix
+                value: /{{ .ObjectMeta.Namespace }}/{{ .ObjectMeta.Name }}/v1/completions
+            timeouts:
+              backendRequest: 0s
+              request: 0s
+          - backendRefs:
+            - group: inference.networking.k8s.io
+              kind: InferencePool
+              name: '{{ ChildName .ObjectMeta.Name `-inference-pool` }}'
+              port: 8000
+              weight: 1
+            filters:
+            - type: URLRewrite
+              urlRewrite:
+                path:
+                  replacePrefixMatch: /v1/chat/completions
+                  type: ReplacePrefixMatch
+            matches:
+            - path:
+                type: PathPrefix
+                value: /{{ .ObjectMeta.Namespace }}/{{ .ObjectMeta.Name }}/v1/chat/completions
+            timeouts:
+              backendRequest: 0s
+              request: 0s
+          - backendRefs:
+            - kind: Service
+              name: '{{ ChildName .ObjectMeta.Name `-kserve-workload-svc` }}'
+              port: 8000
+              weight: 1
+            filters:
+            - type: URLRewrite
+              urlRewrite:
+                path:
+                  replacePrefixMatch: /
+                  type: ReplacePrefixMatch
+            matches:
+            - path:
+                type: PathPrefix
+                value: /{{ .ObjectMeta.Namespace }}/{{ .ObjectMeta.Name }}
+            timeouts:
+              backendRequest: 0s
+              request: 0s
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-scheduler
+  namespace: kserve
+spec:
+  router:
+    scheduler:
+      pool:
+        spec:
+          endpointPickerRef:
+            failureMode: FailOpen
+            kind: Service
+            name: '{{ ChildName .ObjectMeta.Name `-epp-service` }}'
+            port:
+              number: 9002
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: '{{ .ObjectMeta.Name }}'
+              app.kubernetes.io/part-of: llminferenceservice
+              kserve.io/component: workload
+          targetPorts:
+          - number: 8000
+      template:
+        containers:
+        - args:
+          - --pool-name
+          - '{{ ChildName .ObjectMeta.Name `-inference-pool` }}'
+          - --pool-namespace
+          - '{{ .ObjectMeta.Namespace }}'
+          - --zap-encoder
+          - json
+          - --grpc-port
+          - "9002"
+          - --grpc-health-port
+          - "9003"
+          - --kv-cache-usage-percentage-metric
+          - vllm:kv_cache_usage_perc
+          image: ghcr.io/llm-d/llm-d-inference-scheduler:v0.4.0
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 3
+            grpc:
+              port: 9003
+              service: liveness
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          name: main
+          ports:
+          - containerPort: 9002
+            name: grpc
+            protocol: TCP
+          - containerPort: 9003
+            name: grpc-health
+            protocol: TCP
+          - containerPort: 9090
+            name: metrics
+            protocol: TCP
+          - containerPort: 5557
+            name: zmq
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            grpc:
+              port: 9003
+              service: readiness
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: 256m
+              memory: 500Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: FallbackToLogsOnError
+          volumeMounts:
+          - mountPath: /etc/ssl/certs
+            name: tls-certs
+            readOnly: true
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 30
+        volumes:
+        - name: tls-certs
+          secret:
+            secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs`
+              }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-template
+  namespace: kserve
+spec:
+  template:
+    containers:
+    - command:
+      - vllm
+      - serve
+      - /mnt/models
+      - --served-model-name
+      - '{{ .Spec.Model.Name }}'
+      - --port
+      - "8000"
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: main
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 5
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      startupProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 10
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+---
+apiVersion: serving.kserve.io/v1alpha2
+kind: LLMInferenceServiceConfig
+metadata:
+  name: kserve-config-llm-worker-data-parallel
+  namespace: kserve
+spec:
+  template:
+    containers:
+    - command:
+      - /bin/bash
+      - -c
+      - |2-
+
+        if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+          echo "Trying to infer RoCE configs ... "
+          grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+          grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+          KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+          echo "[Infer RoCE] Discovering active HCAs ..."
+          active_hcas=()
+          # Loop through all mlx5 devices found in sysfs
+          for hca_dir in /sys/class/infiniband/mlx5_*; do
+              # Ensure it's a directory before proceeding
+              if [ -d "$hca_dir" ]; then
+                  hca_name=$(basename "$hca_dir")
+                  port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                  type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                  echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                  if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                      echo "[Infer RoCE] Found active HCA: $hca_name"
+                      active_hcas+=("$hca_name")
+                  else
+                      echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                  fi
+              fi
+          done
+
+          ucx_hcas=()
+          for hca in "${active_hcas[@]}"; do
+            ucx_hcas+=("${hca}:1")
+          done
+
+          # Check if we found any active HCAs
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              # Join the array elements with a comma
+              hcas=$(IFS=,; echo "${active_hcas[*]}")
+              echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+              export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+              export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+              export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+              echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+              echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+          else
+              echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+          fi
+
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+              # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+              declare -A gid_index_count
+              declare -A hca_gid_index
+
+              for hca_name in "${active_hcas[@]}"; do
+                  echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                  # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                  for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                      if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                          idx=$(basename "$tpath")
+                          gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                          # Check for IPv4 GID (contains ffff:)
+                          if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                              gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                              echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                              hca_gid_index["${hca_name}"]="${idx}"
+                              gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                              break  # Use first found IPv4 GID per HCA
+                          fi
+                      fi
+                  done
+              done
+
+              # Find the most common GID index (most likely to be consistent across nodes)
+              best_gid_index=""
+              max_count=0
+              for idx in "${!gid_index_count[@]}"; do
+                  count=${gid_index_count["${idx}"]}
+                  echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                  if [ $count -gt $max_count ]; then
+                      max_count=$count
+                      best_gid_index="$idx"
+                  fi
+              done
+
+              # Use deterministic fallback if counts are equal - prefer lower index number
+              if [ ${#gid_index_count[@]} -gt 1 ]; then
+                  echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                  # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                  if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                      best_gid_index="3"
+                      echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                  fi
+              fi
+
+              # Check if GID_INDEX is already set via environment variables
+              if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                  echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+              elif [ -n "$best_gid_index" ]; then
+                  echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                  echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+              else
+                  echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+              fi
+          else
+              echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+          fi
+        fi
+
+        START_RANK=0
+        eval "vllm serve \
+          /mnt/models \
+          --served-model-name "{{ .Spec.Model.Name }}" \
+          --port 8000 \
+          --api-server-count ${VLLM_API_SERVER_COUNT:-8} \
+          {{- if .Spec.Parallelism.Expert -}}--enable-expert-parallel{{- end }} \
+          {{- if .Spec.Parallelism.Tensor -}}--tensor-parallel-size {{ .Spec.Parallelism.Tensor }}{{- end }} \
+          --data-parallel-size {{ or .Spec.Parallelism.Data 1 }} \
+          --data-parallel-size-local {{ or .Spec.Parallelism.DataLocal 1 }} \
+          --data-parallel-address $(LWS_LEADER_ADDRESS) \
+          --data-parallel-rpc-port {{ if .Spec.Parallelism.DataRPCPort }}{{ .Spec.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+          --data-parallel-start-rank $START_RANK \
+          ${VLLM_ADDITIONAL_ARGS} \
+          $@ \
+          --trust-remote-code"
+          # BackendTLSPolicy is not implemented yet so disable SSL for now
+          # --enable-ssl-refresh \
+          # --ssl-certfile \
+          # /etc/ssl/certs/tls.crt \
+          # --ssl-keyfile \
+          # /etc/ssl/certs/tls.key"
+      - --
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      livenessProbe:
+        failureThreshold: 3
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 10
+        timeoutSeconds: 10
+      name: main
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+      readinessProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 30
+        timeoutSeconds: 5
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          add:
+          - IPC_LOCK
+          - SYS_RAWIO
+          - NET_RAW
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      startupProbe:
+        failureThreshold: 60
+        httpGet:
+          path: /health
+          port: 8000
+          scheme: HTTP
+        periodSeconds: 10
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+  worker:
+    containers:
+    - command:
+      - /bin/bash
+      - -c
+      - |2-
+
+        if [ "$KSERVE_INFER_ROCE" = "true" ]; then
+          echo "Trying to infer RoCE configs ... "
+          grep -H . /sys/class/infiniband/*/ports/*/gids/* 2>/dev/null
+          grep -H . /sys/class/infiniband/*/ports/*/gid_attrs/types/* 2>/dev/null
+
+          KSERVE_INFER_IB_GID_INDEX_GREP=${KSERVE_INFER_IB_GID_INDEX_GREP:-"RoCE v2"}
+
+          echo "[Infer RoCE] Discovering active HCAs ..."
+          active_hcas=()
+          # Loop through all mlx5 devices found in sysfs
+          for hca_dir in /sys/class/infiniband/mlx5_*; do
+              # Ensure it's a directory before proceeding
+              if [ -d "$hca_dir" ]; then
+                  hca_name=$(basename "$hca_dir")
+                  port_state_file="$hca_dir/ports/1/state" # Assume port 1
+                  type_file="$hca_dir/ports/1/gid_attrs/types/*"
+
+                  echo "[Infer RoCE] Check if the port state file ${port_state_file} exists and contains 'ACTIVE'"
+                  if [ -f "$port_state_file" ] && grep -q "ACTIVE" "$port_state_file" && grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" ${type_file} 2>/dev/null; then
+                      echo "[Infer RoCE] Found active HCA: $hca_name"
+                      active_hcas+=("$hca_name")
+                  else
+                      echo "[Infer RoCE] Skipping inactive or down HCA: $hca_name"
+                  fi
+              fi
+          done
+
+          ucx_hcas=()
+          for hca in "${active_hcas[@]}"; do
+            ucx_hcas+=("${hca}:1")
+          done
+
+          # Check if we found any active HCAs
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              # Join the array elements with a comma
+              hcas=$(IFS=,; echo "${active_hcas[*]}")
+              echo "[Infer RoCE] Setting active HCAs: ${hcas}"
+              export NCCL_IB_HCA=${NCCL_IB_HCA:-${hcas}}
+              export NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST:-${hcas}}
+              export UCX_NET_DEVICES=${UCX_NET_DEVICES:-${ucx_hcas}}
+
+              echo "[Infer RoCE] NCCL_IB_HCA=${NCCL_IB_HCA}"
+              echo "[Infer RoCE] NVSHMEM_HCA_LIST=${NVSHMEM_HCA_LIST}"
+          else
+              echo "[Infer RoCE] WARNING: No active RoCE HCAs found. NCCL_IB_HCA will not be set."
+          fi
+
+          if [ ${#active_hcas[@]} -gt 0 ]; then
+              echo "[Infer RoCE] Finding GID_INDEX for each active HCA (SR-IOV compatible)..."
+
+              # For SR-IOV environments, find the most common IPv4 RoCE v2 GID index across all HCAs
+              declare -A gid_index_count
+              declare -A hca_gid_index
+
+              for hca_name in "${active_hcas[@]}"; do
+                  echo "[Infer RoCE] Processing HCA: ${hca_name}"
+
+                  # Find all RoCE v2 IPv4 GIDs for this HCA and count by index
+                  for tpath in /sys/class/infiniband/${hca_name}/ports/1/gid_attrs/types/*; do
+                      if grep -q "${KSERVE_INFER_IB_GID_INDEX_GREP}" "$tpath" 2>/dev/null; then
+                          idx=$(basename "$tpath")
+                          gid_file="/sys/class/infiniband/${hca_name}/ports/1/gids/${idx}"
+                          # Check for IPv4 GID (contains ffff:)
+                          if [ -f "$gid_file" ] && grep -q "ffff:" "$gid_file"; then
+                              gid_value=$(cat "$gid_file" 2>/dev/null || echo "")
+                              echo "[Infer RoCE] Found IPv4 RoCE v2 GID for ${hca_name}: index=${idx}, gid=${gid_value}"
+                              hca_gid_index["${hca_name}"]="${idx}"
+                              gid_index_count["${idx}"]=$((${gid_index_count["${idx}"]} + 1))
+                              break  # Use first found IPv4 GID per HCA
+                          fi
+                      fi
+                  done
+              done
+
+              # Find the most common GID index (most likely to be consistent across nodes)
+              best_gid_index=""
+              max_count=0
+              for idx in "${!gid_index_count[@]}"; do
+                  count=${gid_index_count["${idx}"]}
+                  echo "[Infer RoCE] GID_INDEX ${idx} found on ${count} HCAs"
+                  if [ $count -gt $max_count ]; then
+                      max_count=$count
+                      best_gid_index="$idx"
+                  fi
+              done
+
+              # Use deterministic fallback if counts are equal - prefer lower index number
+              if [ ${#gid_index_count[@]} -gt 1 ]; then
+                  echo "[Infer RoCE] Multiple GID indices found, selecting most common: ${best_gid_index}"
+                  # If there's a tie, prefer index 3 as it's most common in SR-IOV setups
+                  if [ -n "${gid_index_count['3']}" ] && [ "${gid_index_count['3']}" -eq "$max_count" ]; then
+                      best_gid_index="3"
+                      echo "[Infer RoCE] Using deterministic fallback: GID_INDEX=3 (SR-IOV standard)"
+                  fi
+              fi
+
+              # Check if GID_INDEX is already set via environment variables
+              if [ -n "${NCCL_IB_GID_INDEX}" ]; then
+                  echo "[Infer RoCE] Using pre-configured NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX} from environment"
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+                  echo "[Infer RoCE] Using hardcoded GID_INDEX=${NCCL_IB_GID_INDEX} for NCCL, NVSHMEM, and UCX"
+              elif [ -n "$best_gid_index" ]; then
+                  echo "[Infer RoCE] Selected GID_INDEX: ${best_gid_index} (found on ${max_count} HCAs)"
+
+                  export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-$best_gid_index}
+                  export NVSHMEM_IB_GID_INDEX=${NVSHMEM_IB_GID_INDEX:-$best_gid_index}
+                  export UCX_IB_GID_INDEX=${UCX_IB_GID_INDEX:-$best_gid_index}
+
+                  echo "[Infer RoCE] Exported GID_INDEX=${best_gid_index} for NCCL, NVSHMEM, and UCX"
+              else
+                  echo "[Infer RoCE] ERROR: No valid IPv4 ${KSERVE_INFER_IB_GID_INDEX_GREP} GID_INDEX found on any HCA."
+              fi
+          else
+              echo "[Infer RoCE] No active HCAs found, skipping GID_INDEX inference."
+          fi
+        fi
+
+        START_RANK=$(( ${LWS_WORKER_INDEX:-0} * {{ or .Spec.Parallelism.DataLocal 1 }} ))
+        eval "vllm serve \
+          /mnt/models \
+          --served-model-name "{{ .Spec.Model.Name }}" \
+          --port 8000 \
+          {{- if .Spec.Parallelism.Expert }}--enable-expert-parallel{{- end }} \
+          {{- if .Spec.Parallelism.Tensor }}--tensor-parallel-size {{ .Spec.Parallelism.Tensor }}{{- end }} \
+          --data-parallel-size {{ or .Spec.Parallelism.Data 1 }} \
+          --data-parallel-size-local {{ or .Spec.Parallelism.DataLocal 1 }} \
+          --data-parallel-address $(LWS_LEADER_ADDRESS) \
+          --data-parallel-rpc-port {{ if .Spec.Parallelism.DataRPCPort }}{{ .Spec.Parallelism.DataRPCPort }}{{ else }}5555{{- end }} \
+          --data-parallel-start-rank $START_RANK \
+          ${VLLM_ADDITIONAL_ARGS} \
+          $@ \
+          --trust-remote-code \
+          --headless"
+          # BackendTLSPolicy is not implemented yet so disable SSL for now
+          # --enable-ssl-refresh \
+          # --ssl-certfile \
+          # /etc/ssl/certs/tls.crt \
+          # --ssl-keyfile \
+          # /etc/ssl/certs/tls.key
+      - --
+      env:
+      - name: HOME
+        value: /home
+      - name: VLLM_LOGGING_LEVEL
+        value: INFO
+      - name: HF_HUB_CACHE
+        value: /models
+      image: ghcr.io/llm-d/llm-d-cuda:v0.4.0
+      imagePullPolicy: IfNotPresent
+      name: main
+      ports:
+      - containerPort: 8000
+        protocol: TCP
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          add:
+          - IPC_LOCK
+          - SYS_RAWIO
+          - NET_RAW
+          drop:
+          - ALL
+        readOnlyRootFilesystem: false
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      terminationMessagePath: /dev/termination-log
+      terminationMessagePolicy: FallbackToLogsOnError
+      volumeMounts:
+      - mountPath: /home
+        name: home
+      - mountPath: /dev/shm
+        name: dshm
+      - mountPath: /models
+        name: model-cache
+      - mountPath: /etc/ssl/certs
+        name: tls-certs
+        readOnly: true
+    terminationGracePeriodSeconds: 30
+    volumes:
+    - emptyDir: {}
+      name: home
+    - emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+      name: dshm
+    - emptyDir: {}
+      name: model-cache
+    - name: tls-certs
+      secret:
+        secretName: '{{ ChildName .ObjectMeta.Name `-kserve-self-signed-certs` }}'
+KSERVE_LLMISVCCONFIG_MANIFEST_EOF
+}
+
+create_kserve_runtime_manifests() {
+    get_kserve_runtime_manifests | kubectl apply --server-side -f -
+}
+
+create_kserve_llmisvcconfig_manifests() {
+    get_kserve_llmisvcconfig_manifests | kubectl apply --server-side -f -
 }
 
 get_kserve_crd_manifest() {
@@ -9875,6 +12603,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -14689,6 +17423,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -28369,6 +31109,12 @@ spec:
                     type: object
                   logger:
                     properties:
+                      batchInterval:
+                        type: string
+                      batchSize:
+                        type: integer
+                      marshallerUrl:
+                        type: string
                       metadataAnnotations:
                         items:
                           type: string
@@ -43303,6 +46049,9 @@ spec:
                             - targetPortNumber
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -63842,6 +66591,9 @@ spec:
                             - targetPorts
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -84487,6 +87239,9 @@ spec:
                             - targetPortNumber
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -105183,6 +107938,9 @@ spec:
                             - targetPorts
                             type: object
                         type: object
+                      replicas:
+                        format: int32
+                        type: integer
                       template:
                         properties:
                           activeDeadlineSeconds:
@@ -117574,6 +120332,18 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - discovery.k8s.io
   resources:
